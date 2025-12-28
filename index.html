@@ -1,0 +1,700 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { 
+  User, Shield, Swords, Coins, Zap, Heart, 
+  TrendingUp, Settings, X, Hammer, MapPin, 
+  Ghost, Skull, Flame, Diamond
+} from 'lucide-react';
+
+// --- KONSTANTEN & DATEN ---
+const MAP_SIZE = 4000;
+const VIEWPORT_W = window.innerWidth;
+const VIEWPORT_H = window.innerHeight;
+
+const ITEM_TYPES = { WEAPON: 'Waffe', ARMOR: 'Rüstung', POTION: 'Trank' };
+
+// Item-Datenbank
+const ITEM_DB = [
+  { id: 'w1', name: 'Schwert', type: ITEM_TYPES.WEAPON, baseDmg: 10, icon: '🗡️' },
+  { id: 'w2', name: 'Langschwert', type: ITEM_TYPES.WEAPON, baseDmg: 15, icon: '⚔️' },
+  { id: 'w3', name: 'Glefe', type: ITEM_TYPES.WEAPON, baseDmg: 20, icon: '🔱' },
+  { id: 'a1', name: 'Mönchsplatten', type: ITEM_TYPES.ARMOR, baseDef: 5, icon: '👕' },
+  { id: 'a2', name: 'Eisenplatten', type: ITEM_TYPES.ARMOR, baseDef: 12, icon: '🛡️' },
+  { id: 'p1', name: 'Roter Trank (K)', type: ITEM_TYPES.POTION, value: 50, icon: '🍷' },
+];
+
+// Monster-Datenbank
+const MOBS = [
+  { name: 'Wildhund', lv: 1, hp: 60, dmg: 5, exp: 15, yang: 20, aggro: 0, icon: '🐕' },
+  { name: 'Hungriger Wolf', lv: 3, hp: 120, dmg: 12, exp: 35, yang: 50, aggro: 150, icon: '🐺' },
+  { name: 'Keiler', lv: 5, hp: 200, dmg: 20, exp: 80, yang: 100, aggro: 200, icon: '🐗' },
+  { name: 'Bär', lv: 10, hp: 450, dmg: 40, exp: 200, yang: 300, aggro: 250, icon: '🐻' },
+  { name: 'Metin der Schlacht', lv: 15, hp: 2500, dmg: 5, exp: 1000, yang: 2000, aggro: 0, isMetin: true, icon: '💎' }
+];
+
+// Hilfsfunktion für ID-Generierung
+const uid = () => Math.random().toString(36).substr(2, 9);
+
+// --- UI KOMPONENTEN ---
+const Window = ({ title, onClose, children, className = "" }) => (
+  <div className={`absolute pointer-events-auto bg-[#1e1a16] border-2 border-[#8a724a] shadow-[0_0_20px_rgba(0,0,0,0.8)] z-50 rounded-sm flex flex-col ${className}`}>
+    <div className="h-8 bg-gradient-to-b from-[#4d3e2c] to-[#2b2218] border-b border-[#8a724a] flex justify-between items-center px-2 cursor-move">
+      <span className="text-[#c5a66a] text-xs font-bold uppercase tracking-wider shadow-black drop-shadow-md">{title}</span>
+      <button onClick={onClose} className="text-[#8a724a] hover:text-[#e0c080]"><X size={14} /></button>
+    </div>
+    <div className="bg-[#120f0d] p-3 flex-1 overflow-auto custom-scrollbar relative">
+      {children}
+    </div>
+  </div>
+);
+
+// --- HAUPT-APP ---
+const App = () => {
+  // --- STATE ---
+  const [player, setPlayer] = useState({
+    name: 'Krieger01',
+    lv: 1, exp: 0, nextExp: 300,
+    hp: 200, maxHp: 200,
+    mp: 100, maxMp: 100,
+    stats: { vit: 3, int: 3, str: 5, dex: 3 },
+    statPoints: 0,
+    yang: 0,
+    pos: { x: 2000, y: 2000 },
+    targetPos: { x: 2000, y: 2000 },
+    inventory: [],
+    equip: { weapon: null, armor: null },
+    skills: { aura: false, auraTimer: 0 }
+  });
+
+  const [entities, setEntities] = useState([]); // Monster
+  const [itemsOnGround, setItemsOnGround] = useState([]); // Loot
+  const [floatingTexts, setFloatingTexts] = useState([]); // DMG Zahlen
+  const [windows, setWindows] = useState({ inv: false, stats: false, smith: false });
+  const [smithItem, setSmithItem] = useState(null);
+  const [camera, setCamera] = useState({ x: 0, y: 0 });
+  const [log, setLog] = useState([]);
+  
+  const canvasRef = useRef(null);
+  const loopRef = useRef();
+
+  // --- INITIALISIERUNG ---
+  useEffect(() => {
+    // Spawn Mobs
+    const initialMobs = [];
+    for(let i=0; i<40; i++) {
+      initialMobs.push(spawnMob());
+    }
+    setEntities(initialMobs);
+    
+    // Start Items
+    addItemToInv({ ...ITEM_DB[0], uid: uid(), lv: 0 });
+    addItemToInv({ ...ITEM_DB[3], uid: uid(), lv: 0 });
+    addItemToInv({ ...ITEM_DB[5], uid: uid(), count: 5 });
+
+    addLog("Willkommen in Map 1! Drücke auf den Boden um zu laufen.");
+  }, []);
+
+  // --- GAME LOOP ---
+  const gameLoop = useCallback(() => {
+    setPlayer(p => {
+      // 1. Bewegung (Lerp)
+      let dx = p.targetPos.x - p.pos.x;
+      let dy = p.targetPos.y - p.pos.y;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      
+      let newPos = { ...p.pos };
+      if (dist > 2) {
+        const speed = 4; // Laufgeschwindigkeit
+        newPos.x += (dx / dist) * speed;
+        newPos.y += (dy / dist) * speed;
+      }
+
+      // 2. Skill Timer
+      let newSkills = { ...p.skills };
+      if (newSkills.auraTimer > 0) newSkills.auraTimer--;
+      else newSkills.aura = false;
+
+      // 3. Regen
+      let newHp = Math.min(p.maxHp, p.hp + (p.stats.vit * 0.01));
+      let newMp = Math.min(p.maxMp, p.mp + (p.stats.int * 0.02));
+
+      return { ...p, pos: newPos, skills: newSkills, hp: newHp, mp: newMp };
+    });
+
+    // 4. Monster KI & Kamera
+    setEntities(prev => prev.map(mob => {
+      if (mob.dead) return mob;
+
+      // Aggro Check
+      setPlayer(p => {
+        const distToPlayer = Math.sqrt((mob.pos.x - p.pos.x)**2 + (mob.pos.y - p.pos.y)**2);
+        
+        // Angriff wenn nah genug
+        if (distToPlayer < 30 && !mob.isMetin) {
+          if (Math.random() < 0.02) { // Angriffsrate
+            const dmg = Math.max(1, mob.dmg - (p.stats.vit + (p.equip.armor?.baseDef || 0)));
+            addFloatingText(p.pos.x, p.pos.y, `-${dmg}`, 'red');
+            p.hp -= dmg;
+          }
+        }
+        
+        // Verfolgung wenn in Aggro Range
+        let newMobPos = { ...mob.pos };
+        if (mob.aggro > 0 && distToPlayer < mob.aggro && distToPlayer > 25) {
+          const dx = p.pos.x - mob.pos.x;
+          const dy = p.pos.y - mob.pos.y;
+          newMobPos.x += (dx / distToPlayer) * 1.5; // Mob Speed
+          newMobPos.y += (dy / distToPlayer) * 1.5;
+        }
+
+        mob.pos = newMobPos;
+        return p; // Player state update (HP) handled here implicitly is tricky in react, but ok for sim
+      });
+      return mob;
+    }));
+
+    // Kamera Update
+    setPlayer(p => {
+      setCamera({
+        x: p.pos.x - VIEWPORT_W / 2,
+        y: p.pos.y - VIEWPORT_H / 2
+      });
+      return p;
+    });
+
+    loopRef.current = requestAnimationFrame(gameLoop);
+  }, []);
+
+  useEffect(() => {
+    loopRef.current = requestAnimationFrame(gameLoop);
+    return () => cancelAnimationFrame(loopRef.current);
+  }, [gameLoop]);
+
+  // --- LOGIK FUNKTIONEN ---
+
+  const spawnMob = () => {
+    const template = MOBS[Math.floor(Math.random() * MOBS.length)];
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 300 + Math.random() * 1000; // Abstand vom Zentrum
+    return {
+      ...template,
+      uid: uid(),
+      maxHp: template.hp,
+      curHp: template.hp,
+      pos: { x: 2000 + Math.cos(angle) * dist, y: 2000 + Math.sin(angle) * dist }
+    };
+  };
+
+  const addItemToInv = (item) => {
+    setPlayer(p => {
+      if (p.inventory.length >= 20) {
+        addLog("Inventar ist voll!");
+        return p;
+      }
+      return { ...p, inventory: [...p.inventory, item] };
+    });
+  };
+
+  const handleMapClick = (e) => {
+    if (e.target.closest('.ui-layer')) return; // Klick auf UI ignorieren
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const worldX = e.clientX - rect.left + camera.x;
+    const worldY = e.clientY - rect.top + camera.y;
+
+    // 1. Loot Check
+    const clickedItem = itemsOnGround.find(i => Math.sqrt((i.pos.x - worldX)**2 + (i.pos.y - worldY)**2) < 30);
+    if (clickedItem) {
+      if (clickedItem.type === 'YANG') {
+        setPlayer(p => ({ ...p, yang: p.yang + clickedItem.amount }));
+        addLog(`Du hast ${clickedItem.amount} Yang aufgehoben.`);
+      } else {
+        addItemToInv(clickedItem);
+        addLog(`Du hast ${clickedItem.name} aufgehoben.`);
+      }
+      setItemsOnGround(prev => prev.filter(i => i.uid !== clickedItem.uid));
+      return;
+    }
+
+    // 2. Monster Check
+    const clickedMob = entities.find(m => !m.dead && Math.sqrt((m.pos.x - worldX)**2 + (m.pos.y - worldY)**2) < 40);
+    if (clickedMob) {
+      playerAttack(clickedMob);
+    } else {
+      // 3. Bewegen
+      setPlayer(p => ({ ...p, targetPos: { x: worldX, y: worldY } }));
+    }
+  };
+
+  const playerAttack = (mob) => {
+    // Distanz Check
+    const dist = Math.sqrt((player.pos.x - mob.pos.x)**2 + (player.pos.y - mob.pos.y)**2);
+    if (dist > 80) {
+      // Hinlaufen
+      setPlayer(p => ({ ...p, targetPos: { x: mob.pos.x, y: mob.pos.y } }));
+      return;
+    }
+
+    // Animation
+    // Schaden berechnen
+    let weaponDmg = player.equip.weapon ? (player.equip.weapon.baseDmg + player.equip.weapon.lv * 5) : 0;
+    let auraBonus = player.skills.aura ? 20 : 0;
+    let dmg = Math.floor((player.stats.str * 2) + weaponDmg + auraBonus + Math.random() * 10);
+    let isCrit = Math.random() < (player.stats.dex * 0.01);
+    if (isCrit) dmg *= 2;
+
+    addFloatingText(mob.pos.x, mob.pos.y - 30, dmg, isCrit ? 'yellow' : 'white');
+
+    // Mob HP Update
+    setEntities(prev => prev.map(m => {
+      if (m.uid !== mob.uid) return m;
+      let newHp = m.curHp - dmg;
+      
+      if (newHp <= 0) {
+        handleKill(m);
+        return { ...m, curHp: 0, dead: true }; // Respawn Logic separate
+      }
+      return { ...m, curHp: newHp };
+    }));
+  };
+
+  const handleKill = (mob) => {
+    addLog(`${mob.name} besiegt! ${mob.exp} EXP erhalten.`);
+    
+    // Loot Droppen
+    const dropPos = { 
+      x: mob.pos.x + (Math.random() * 40 - 20), 
+      y: mob.pos.y + (Math.random() * 40 - 20) 
+    };
+    
+    // Yang immer droppen
+    setItemsOnGround(prev => [...prev, { 
+      uid: uid(), type: 'YANG', amount: mob.yang, pos: dropPos 
+    }]);
+
+    // Item Chance
+    if (Math.random() < 0.3) {
+       const dropItem = { ...ITEM_DB[Math.floor(Math.random() * (ITEM_DB.length-1))], uid: uid(), lv: 0, pos: { x: mob.pos.x, y: mob.pos.y } };
+       setItemsOnGround(prev => [...prev, dropItem]);
+    }
+
+    // Player Stats Update
+    setPlayer(p => {
+      let { exp, lv, nextExp, statPoints } = p;
+      exp += mob.exp;
+      if (exp >= nextExp) {
+        lv++;
+        exp -= nextExp;
+        nextExp = Math.floor(nextExp * 1.5);
+        statPoints += 3;
+        addLog(`LEVEL UP! Du bist Level ${lv}.`);
+        addFloatingText(p.pos.x, p.pos.y - 60, "LEVEL UP!", "#d4af37");
+      }
+      return { ...p, exp, lv, nextExp, statPoints };
+    });
+
+    // Respawn nach Zeit
+    setTimeout(() => {
+      setEntities(prev => prev.filter(m => m.uid !== mob.uid).concat(spawnMob()));
+    }, 5000);
+  };
+
+  const addFloatingText = (x, y, text, color) => {
+    const id = uid();
+    setFloatingTexts(prev => [...prev, { id, x, y, text, color }]);
+    setTimeout(() => setFloatingTexts(prev => prev.filter(t => t.id !== id)), 800);
+  };
+
+  const addLog = (msg) => {
+    setLog(prev => [msg, ...prev].slice(0, 8));
+  };
+
+  // --- SCHMIEDE SYSTEM ---
+  const handleRefine = () => {
+    if (!smithItem) return;
+    if (player.yang < 500) { addLog("Nicht genug Yang!"); return; }
+
+    const chance = 90 - (smithItem.lv * 10);
+    const success = Math.random() * 100 < chance;
+
+    setPlayer(p => {
+      let newInv = [...p.inventory];
+      let newEquip = { ...p.equip };
+      let itemIdx = newInv.findIndex(i => i.uid === smithItem.uid);
+
+      if (success) {
+        addLog(`Verbesserung erfolgreich: +${smithItem.lv + 1}`);
+        const newItem = { ...smithItem, lv: smithItem.lv + 1 };
+        
+        // Update Inv or Equip
+        if (itemIdx >= 0) newInv[itemIdx] = newItem;
+        if (p.equip.weapon?.uid === smithItem.uid) newEquip.weapon = newItem;
+        if (p.equip.armor?.uid === smithItem.uid) newEquip.armor = newItem;
+        
+        setSmithItem(newItem); // Keep in slot
+      } else {
+        addLog(`Fehlgeschlagen! ${smithItem.name} zerstört.`);
+        if (itemIdx >= 0) newInv.splice(itemIdx, 1);
+        if (p.equip.weapon?.uid === smithItem.uid) newEquip.weapon = null;
+        if (p.equip.armor?.uid === smithItem.uid) newEquip.armor = null;
+        setSmithItem(null);
+      }
+      return { ...p, yang: p.yang - 500, inventory: newInv, equip: newEquip };
+    });
+  };
+
+  // --- RENDER HELPERS ---
+  const getRarityColor = (lv) => {
+    if (lv >= 7) return 'text-[#d4af37] drop-shadow-[0_0_2px_gold]'; // Gold
+    if (lv >= 5) return 'text-[#a335ee]'; // Epicish
+    return 'text-white';
+  };
+
+  return (
+    <div className="w-full h-screen bg-black overflow-hidden font-serif select-none cursor-default text-[#d6d6d6]">
+      
+      {/* --- WORLD LAYER --- */}
+      <div 
+        onMouseDown={handleMapClick}
+        className="relative w-full h-full"
+        style={{
+          background: '#2d3822', // Dark grass base
+        }}
+      >
+        <div 
+          className="absolute origin-top-left will-change-transform"
+          style={{ 
+            transform: `translate(${-camera.x}px, ${-camera.y}px)`,
+            width: MAP_SIZE, height: MAP_SIZE,
+            backgroundImage: 'repeating-linear-gradient(45deg, #2d3822 0, #2d3822 20px, #26301d 20px, #26301d 40px)'
+          }}
+        >
+          {/* Dorfplatz */}
+          <div className="absolute left-[1800px] top-[1800px] w-[400px] h-[400px] bg-[#4a4238] rounded-full border-[20px] border-[#3d362e] shadow-xl">
+             {/* Schmied */}
+             <div 
+                onClick={(e) => { e.stopPropagation(); setWindows(prev => ({...prev, smith: true})); }}
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center cursor-pointer group"
+             >
+                <div className="text-[10px] bg-black/50 text-[#d4af37] px-2 mb-1 border border-[#d4af37]">Dorfschmied</div>
+                <div className="text-4xl animate-bounce group-hover:scale-110 transition-transform">⚒️</div>
+             </div>
+          </div>
+
+          {/* Player Line to Target */}
+          {player.targetPos && (
+             <div className="absolute w-2 h-2 bg-yellow-500 rounded-full opacity-50 animate-ping" style={{ left: player.targetPos.x, top: player.targetPos.y }} />
+          )}
+
+          {/* LOOT */}
+          {itemsOnGround.map(item => (
+            <div key={item.uid} className="absolute flex flex-col items-center animate-bounce" style={{ left: item.pos.x, top: item.pos.y, pointerEvents: 'none' }}>
+               <div className="text-[10px] text-[#d4af37] font-bold drop-shadow-md">{item.type === 'YANG' ? 'Yang' : item.name}</div>
+               <div className="text-xl">{item.type === 'YANG' ? <Coins size={16} color="gold" /> : item.icon}</div>
+            </div>
+          ))}
+
+          {/* MONSTERS */}
+          {entities.map(mob => !mob.dead && (
+            <div key={mob.uid} className="absolute flex flex-col items-center transition-transform duration-100" style={{ left: mob.pos.x, top: mob.pos.y, transform: 'translate(-50%, -50%)', pointerEvents: 'none' }}>
+              <div className={`text-[10px] px-1 bg-black/60 rounded ${mob.aggro > 0 ? 'text-red-500' : 'text-stone-300'} whitespace-nowrap`}>
+                Lv.{mob.lv} {mob.name}
+              </div>
+              <div className="w-8 h-1 bg-stone-900 border border-stone-600 mt-0.5 mb-0.5">
+                <div className="h-full bg-red-600" style={{ width: `${(mob.curHp/mob.maxHp)*100}%` }} />
+              </div>
+              <div className={`text-4xl ${mob.isMetin ? 'animate-pulse drop-shadow-[0_0_15px_purple]' : ''}`}>
+                {mob.icon}
+              </div>
+            </div>
+          ))}
+
+          {/* PLAYER */}
+          <div className="absolute flex flex-col items-center z-10" style={{ left: player.pos.x, top: player.pos.y, transform: 'translate(-50%, -50%)', pointerEvents: 'none' }}>
+             <div className="text-[10px] bg-yellow-900/80 px-2 border border-yellow-600 text-yellow-100 font-bold mb-1">
+               Lv.{player.lv} {player.name}
+             </div>
+             {player.skills.aura && <div className="absolute w-20 h-20 bg-red-500/20 rounded-full animate-pulse -z-10 blur-md" />}
+             <div className="text-5xl drop-shadow-xl relative">
+                👤
+                {player.equip.weapon && <div className="absolute top-2 -right-4 text-2xl rotate-45">{player.equip.weapon.icon}</div>}
+             </div>
+          </div>
+
+          {/* FLOATING TEXT */}
+          {floatingTexts.map(ft => (
+            <div key={ft.id} className="absolute text-lg font-bold drop-shadow-md animate-[floatUp_0.8s_ease-out_forwards]" 
+                 style={{ left: ft.x, top: ft.y, color: ft.color }}>
+              {ft.text}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* --- UI LAYER --- */}
+      <div className="absolute inset-0 pointer-events-none ui-layer">
+        
+        {/* MINIMAP */}
+        <div className="absolute top-4 right-4 pointer-events-auto">
+          <div className="w-36 h-36 bg-[#2b2b2b] border-2 border-[#8a724a] rounded-sm relative overflow-hidden">
+            <div className="absolute inset-0 opacity-50 bg-[#2d3822]" />
+            <div className="absolute w-1 h-1 bg-white" style={{ left: '50%', top: '50%' }} />
+            {entities.map(e => !e.dead && (
+              <div key={e.uid} className={`absolute w-1 h-1 rounded-full ${e.isMetin ? 'bg-purple-500 w-2 h-2' : 'bg-red-500'}`} 
+                   style={{ left: `${50 + (e.pos.x - player.pos.x)/20}%`, top: `${50 + (e.pos.y - player.pos.y)/20}%` }} />
+            ))}
+            <div className="absolute bottom-0 right-0 bg-black/80 text-[#d4af37] text-[9px] px-1">Map 1 - CH1</div>
+          </div>
+          <div className="flex gap-1 mt-1 justify-end">
+             <button className="bg-black/50 p-1 text-[#d4af37] border border-[#8a724a] text-[10px]" onClick={() => addLog(`Pos: ${Math.floor(player.pos.x)}, ${Math.floor(player.pos.y)}`)}>M</button>
+             <button className="bg-black/50 p-1 text-[#d4af37] border border-[#8a724a] text-[10px]" onClick={() => setWindows(p => ({...p, inv: !p.inv}))}>I</button>
+             <button className="bg-black/50 p-1 text-[#d4af37] border border-[#8a724a] text-[10px]" onClick={() => setWindows(p => ({...p, stats: !p.stats}))}>C</button>
+          </div>
+        </div>
+
+        {/* TOP LEFT STATS */}
+        <div className="absolute top-4 left-4 flex gap-2 pointer-events-auto">
+           <div className="flex flex-col gap-1 w-48">
+              <div className="h-4 bg-black border border-[#555] relative rounded-sm overflow-hidden">
+                 <div className="h-full bg-gradient-to-r from-red-800 to-red-500 transition-all duration-300" style={{ width: `${(player.hp/player.maxHp)*100}%` }} />
+                 <span className="absolute inset-0 flex items-center justify-center text-[9px] text-white drop-shadow-md">TP: {Math.floor(player.hp)}</span>
+              </div>
+              <div className="h-4 bg-black border border-[#555] relative rounded-sm overflow-hidden">
+                 <div className="h-full bg-gradient-to-r from-blue-800 to-blue-500 transition-all duration-300" style={{ width: `${(player.mp/player.maxMp)*100}%` }} />
+                 <span className="absolute inset-0 flex items-center justify-center text-[9px] text-white drop-shadow-md">MP: {Math.floor(player.mp)}</span>
+              </div>
+           </div>
+        </div>
+
+        {/* CHAT / LOG */}
+        <div className="absolute bottom-24 left-4 w-80 h-32 pointer-events-auto hover:bg-black/40 transition-colors rounded-sm flex flex-col justify-end text-[11px] p-2 text-shadow-sm font-sans tracking-wide">
+           {log.map((l, i) => (
+             <div key={i} className="text-[#eee] drop-shadow-md">{l}</div>
+           ))}
+        </div>
+
+        {/* BOTTOM BAR (HUD) */}
+        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[600px] h-20 bg-[url('https://www.transparenttextures.com/patterns/dark-leather.png')] bg-[#2b2218] border-t-2 border-[#8a724a] flex items-center justify-between px-6 pointer-events-auto shadow-[0_-5px_15px_rgba(0,0,0,0.8)] z-40">
+           
+           {/* ORBS */}
+           <div className="relative -top-4 flex gap-1">
+              <div className="w-14 h-14 rounded-full bg-black border-2 border-[#8a724a] overflow-hidden shadow-inner flex items-center justify-center relative group">
+                 <div className="absolute bottom-0 w-full bg-[radial-gradient(circle_at_30%_30%,_#ff6b6b,_#800000)] transition-all duration-300" style={{ height: `${(player.hp/player.maxHp)*100}%` }} />
+                 <span className="z-10 font-bold text-xs drop-shadow-md group-hover:block hidden">{Math.floor(player.hp)}</span>
+              </div>
+              <div className="w-12 h-12 rounded-full bg-black border-2 border-[#8a724a] overflow-hidden shadow-inner mt-2 flex items-center justify-center relative group">
+                 <div className="absolute bottom-0 w-full bg-[radial-gradient(circle_at_30%_30%,_#4dabf7,_#004080)] transition-all duration-300" style={{ height: `${(player.mp/player.maxMp)*100}%` }} />
+              </div>
+           </div>
+
+           {/* SKILLS & SLOTS */}
+           <div className="flex gap-1">
+              <div 
+                onClick={() => setPlayer(p => ({...p, skills: {...p.skills, aura: true, auraTimer: 1000}}))}
+                className={`w-8 h-8 bg-[#1a1510] border border-[#555] hover:border-[#d4af37] cursor-pointer flex items-center justify-center relative overflow-hidden ${player.skills.aura ? 'border-[#d4af37] shadow-[0_0_10px_orange]' : ''}`}
+              >
+                <span className="text-xl">🔥</span>
+                <span className="absolute top-0 left-0 text-[8px] bg-black/50 px-0.5">1</span>
+                {player.skills.aura && <div className="absolute bottom-0 w-full bg-black/50 h-full animate-[slideDown_60s_linear]" style={{animationDuration: '60s'}} />}
+              </div>
+              {[2,3,4].map(n => (
+                 <div key={n} className="w-8 h-8 bg-[#1a1510] border border-[#555] flex items-center justify-center text-[#555] text-xs font-bold">{n}</div>
+              ))}
+           </div>
+
+           {/* MENU ICONS */}
+           <div className="flex gap-2 text-[#8a724a]">
+              <User className="cursor-pointer hover:text-white" onClick={() => setWindows(p => ({...p, stats: !p.stats}))} />
+              <Shield className="cursor-pointer hover:text-white" onClick={() => setWindows(p => ({...p, inv: !p.inv}))} />
+              <Settings className="cursor-pointer hover:text-white" />
+           </div>
+
+           {/* EXP BAR */}
+           <div className="absolute bottom-0 left-0 w-full h-1.5 bg-black flex gap-[1px]">
+              {Array.from({length: 4}).map((_, i) => (
+                <div key={i} className="flex-1 bg-[#333] relative overflow-hidden">
+                   <div className="h-full bg-yellow-500 shadow-[0_0_5px_gold]" style={{ width: `${Math.max(0, Math.min(100, (player.exp / player.nextExp) * 400 - (i*100)))}%` }} />
+                </div>
+              ))}
+           </div>
+        </div>
+
+        {/* --- WINDOWS --- */}
+
+        {/* INVENTORY */}
+        {windows.inv && (
+          <Window title="Inventar" className="top-20 right-10 w-64 h-96" onClose={() => setWindows(p => ({...p, inv: false}))}>
+             {/* Equipment Grid */}
+             <div className="flex justify-center gap-4 mb-4 border-b border-[#333] pb-2">
+                <div className="w-12 h-16 bg-[#0a0a0a] border border-[#333] flex items-center justify-center relative"
+                     onClick={() => player.equip.weapon && setPlayer(p => {
+                       const wep = p.equip.weapon;
+                       return { ...p, equip: {...p.equip, weapon: null}, inventory: [...p.inventory, wep] };
+                     })}>
+                   {player.equip.weapon ? (
+                     <>
+                      <span className="text-2xl">{player.equip.weapon.icon}</span>
+                      <span className="absolute bottom-0 right-0 text-[9px] text-[#d4af37]">+{player.equip.weapon.lv}</span>
+                     </>
+                   ) : <span className="text-[#333] text-xs">Waffe</span>}
+                </div>
+                <div className="w-12 h-16 bg-[#0a0a0a] border border-[#333] flex items-center justify-center relative"
+                     onClick={() => player.equip.armor && setPlayer(p => {
+                        const arm = p.equip.armor;
+                        return { ...p, equip: {...p.equip, armor: null}, inventory: [...p.inventory, arm] };
+                      })}>
+                   {player.equip.armor ? (
+                     <>
+                      <span className="text-2xl">{player.equip.armor.icon}</span>
+                      <span className="absolute bottom-0 right-0 text-[9px] text-[#d4af37]">+{player.equip.armor.lv}</span>
+                     </>
+                   ) : <span className="text-[#333] text-xs">Rüstung</span>}
+                </div>
+             </div>
+
+             {/* Inventory Grid */}
+             <div className="grid grid-cols-5 gap-1">
+                {Array.from({length: 20}).map((_, i) => {
+                  const item = player.inventory[i];
+                  return (
+                    <div key={i} className="w-10 h-10 bg-[#0a0a0a] border border-[#333] hover:border-[#8a724a] relative flex items-center justify-center cursor-pointer group"
+                         onClick={() => {
+                           if (!item) return;
+                           // Smith select or Equip
+                           if (windows.smith) { setSmithItem(item); return; }
+                           // Equip logic
+                           if (item.type === ITEM_TYPES.WEAPON) {
+                             setPlayer(p => ({
+                               ...p, 
+                               equip: {...p.equip, weapon: item}, 
+                               inventory: p.inventory.filter(invItem => invItem.uid !== item.uid).concat(p.equip.weapon ? [p.equip.weapon] : [])
+                             }));
+                           } else if (item.type === ITEM_TYPES.ARMOR) {
+                             setPlayer(p => ({
+                               ...p, 
+                               equip: {...p.equip, armor: item}, 
+                               inventory: p.inventory.filter(invItem => invItem.uid !== item.uid).concat(p.equip.armor ? [p.equip.armor] : [])
+                             }));
+                           } else if (item.type === ITEM_TYPES.POTION) {
+                              setPlayer(p => ({ 
+                                ...p, 
+                                hp: Math.min(p.maxHp, p.hp + item.value),
+                                inventory: p.inventory.filter(invItem => invItem.uid !== item.uid)
+                              }));
+                           }
+                         }}>
+                       {item && (
+                         <>
+                           <span className="text-xl drop-shadow-md">{item.icon}</span>
+                           {item.lv !== undefined && <span className={`absolute bottom-0 right-0 text-[8px] font-bold ${getRarityColor(item.lv)}`}>+{item.lv}</span>}
+                           {/* Tooltip */}
+                           <div className="hidden group-hover:block absolute z-50 bottom-full right-0 bg-[#111] border border-[#8a724a] w-32 p-2 text-xs text-[#ccc] pointer-events-none">
+                              <div className="text-[#d4af37] font-bold">{item.name} {item.lv !== undefined ? `+${item.lv}` : ''}</div>
+                              <div className="text-[10px] text-[#888]">{item.type}</div>
+                              {item.baseDmg && <div className="mt-1">Angriffswert: {item.baseDmg + (item.lv*5)}</div>}
+                              {item.baseDef && <div className="mt-1">Verteidigung: {item.baseDef + (item.lv*2)}</div>}
+                           </div>
+                         </>
+                       )}
+                    </div>
+                  );
+                })}
+             </div>
+             <div className="mt-2 text-right text-[#d4af37] text-xs font-bold border-t border-[#333] pt-1">
+                {player.yang.toLocaleString()} Yang
+             </div>
+          </Window>
+        )}
+
+        {/* STATUS */}
+        {windows.stats && (
+          <Window title="Charakterstatus" className="top-20 left-10 w-64 h-80" onClose={() => setWindows(p => ({...p, stats: false}))}>
+             <div className="flex justify-between items-center bg-[#222] p-1 mb-2 border border-[#444]">
+                <span className="text-[10px] text-gray-400">STATUSPUNKTE</span>
+                <span className="text-[#d4af37] font-bold">{player.statPoints}</span>
+             </div>
+             {['vit', 'int', 'str', 'dex'].map(stat => (
+               <div key={stat} className="flex justify-between items-center mb-1 px-1 hover:bg-[#1a1a1a]">
+                  <span className="text-xs uppercase text-[#aaa] font-bold">{stat}</span>
+                  <div className="flex items-center gap-2">
+                     <span className="text-white text-xs font-mono">{player.stats[stat]}</span>
+                     <button 
+                        onClick={() => player.statPoints > 0 && setPlayer(p => {
+                          const changes = { ...p.stats, [stat]: p.stats[stat]+1 };
+                          // Auto calc secondary stats
+                          const maxHp = 200 + (changes.vit * 20);
+                          const maxMp = 100 + (changes.int * 10);
+                          return { ...p, stats: changes, statPoints: p.statPoints-1, maxHp, maxMp };
+                        })}
+                        className="w-4 h-4 bg-[#333] border border-[#555] flex items-center justify-center text-[8px] text-[#d4af37] hover:bg-[#555] active:translate-y-[1px]"
+                     >+</button>
+                  </div>
+               </div>
+             ))}
+             <div className="border-t border-[#444] mt-4 pt-2 text-[10px] text-gray-500">
+                <div>HP Regeneration: {player.stats.vit * 2}</div>
+                <div>Angriffswert: {player.stats.str * 2 + (player.equip.weapon ? player.equip.weapon.baseDmg + player.equip.weapon.lv*5 : 0)}</div>
+                <div>Verteidigung: {player.stats.vit + (player.equip.armor ? player.equip.armor.baseDef + player.equip.armor.lv*2 : 0)}</div>
+             </div>
+          </Window>
+        )}
+
+        {/* BLACKSMITH */}
+        {windows.smith && (
+          <Window title="Schmied" className="top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-auto" onClose={() => {setWindows(p => ({...p, smith: false})); setSmithItem(null);}}>
+             <div className="flex flex-col items-center p-4">
+                <div className="text-4xl mb-4 animate-pulse">⚒️</div>
+                <div className="text-center text-xs text-[#aaa] mb-4">
+                   {smithItem ? 
+                     `Möchtest du ${smithItem.name} auf +${smithItem.lv+1} verbessern?` : 
+                     "Ziehe ein Item hierher oder klicke es im Inventar an."}
+                </div>
+                
+                {smithItem && (
+                  <div className="w-full bg-[#0a0a0a] border border-[#444] p-2 mb-4 flex items-center justify-between">
+                     <div className="flex items-center gap-2">
+                        <span className="text-2xl">{smithItem.icon}</span>
+                        <div className="flex flex-col">
+                           <span className="text-xs text-[#d4af37]">{smithItem.name} +{smithItem.lv}</span>
+                           <span className="text-[9px] text-gray-500">Chance: {Math.max(10, 90 - smithItem.lv * 10)}%</span>
+                        </div>
+                     </div>
+                     <div className="text-xs text-[#d4af37]">➔ +{smithItem.lv+1}</div>
+                  </div>
+                )}
+
+                <div className="flex gap-2 w-full">
+                   <button 
+                      disabled={!smithItem}
+                      onClick={handleRefine}
+                      className="flex-1 bg-[#2b3d22] border border-[#4a6b38] text-[#8cb870] py-1 text-xs uppercase hover:bg-[#364d2a] disabled:opacity-30 disabled:cursor-not-allowed"
+                   >
+                     Verbessern (500 Yang)
+                   </button>
+                   <button 
+                      onClick={() => {setWindows(p => ({...p, smith: false})); setSmithItem(null);}}
+                      className="flex-1 bg-[#3d2222] border border-[#6b3838] text-[#b87070] py-1 text-xs uppercase hover:bg-[#4d2a2a]"
+                   >
+                     Abbrechen
+                   </button>
+                </div>
+             </div>
+          </Window>
+        )}
+
+      </div>
+      
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { bg: #000; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { bg: #8a724a; }
+        @keyframes floatUp {
+          0% { transform: translateY(0); opacity: 1; }
+          100% { transform: translateY(-50px); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default App;
+
